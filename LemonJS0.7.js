@@ -4,7 +4,7 @@
 /*
 MIT License
 
-Copyright (c) 2017 Moritz Amando Clerc(@PixlDemon)
+Copyright (c) 2019 Moritz Amando Clerc(@pixldemon)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -25,25 +25,66 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 features:
- -scenes
+ -scenegraph
  -entity system(create and manage entities, define components)
  -sprites
  -animations
  -input handling
  -some game math
  -tweening
- -create tilesets
+ -tilesets
  -load tiled worlds in tiled editor format
  -an universal asset loader
+ -some vector math
+ -spritefonts
+ -advanced camera movement
+ -lineofsight algorythm
  -more, smaller stuff
 
-feedback is highly appreciated :3
+NOTE: This engine is written with customizability in mind. Entities have many methods, you can overwrite them to
+change the entities behavior.
+It is advised to put the collision logic into the updatePos method of every entitiy, right after
+you update its position. Other logic and behavior code can be put into onupdate, it is not used by the engine itself so
+do with it whatever you want. Also, the input method is meant to be completely rewritten to handle user input in it.
+for example:
+
+player.input=()=>{
+    this.xv=this.yv=0;
+    if(Lemon.keyDown("A")){
+        this.xv=-this.speed;
+    }
+    if(Lemon.keyDown("W")){
+        this.yv=-this.speed;
+    }
+    if(Lemon.keyDown("D")){
+        this.xv=this.speed;
+    }
+    if(Lemon.keyDown("S")){
+        this.xv=this.speed;
+    }
+}
+player.updatePos=()=>{
+    this.x+=this.xv*(Lemon.dt/10)
+    this.y+=this.yv*(Lemon.dt/10)
+
+    this.blockMovement("barriers");
+}
+
+for a WASD controlled player entity that is unable to move through entities with the tag "barriers" in their "tags" array.
+a barrier could be created by loading a tilemap with a layer called "barriers", (with all the walls in it) or with the following line of code:
+
+let barrier=Lemon.e("body barriers").attr({coordinates and dimensons}).addToScene(yourGameScene);
+
+Pass the tag "body"(or whatever youve set Lemon.bodyTag to) to every entity you want the blockMovement/lineOfSight method to check, even if it has the tag you passed to blockMovement.
+I would advise using that for your own collision checks too, because it reduces the overall entities to check and is quicker than mapping a new array with valid entities.
+All the entities that have that tag can also be found in the "bodies" array that every scene has.
 */
 
 let Lemon={
     classes:{},
     math:{},
     components:{},
+    gamepads:{},
     animations:[],
     tweens:[],
     entityCount:0,
@@ -53,6 +94,11 @@ let Lemon={
     fixedUpdateInterval:1000/40,
     lastfixedUpdate:0,
     pixelart:true,
+    pixelPerfectRendering:true,
+    hideCursor:false,
+    showfps:false,
+    fps:0,
+    bodyTag:"body",
     mouse:{
         get worldX(){
             return (this.screenX/Lemon.scale)+Lemon.camX;
@@ -109,6 +155,12 @@ let Lemon={
     },
     set running(value){
         Lemon.currentScene.running=value;
+    },
+    get dt(){
+        return Lemon.elapsed;//Date.now()-Lemon.lastStep;
+    },
+    set dt(value){
+        Lemon.elapsed=value;
     }
 };
 
@@ -137,6 +189,8 @@ Lemon.init=function(config){
 
     Lemon.canvas.width=Lemon.width;
     Lemon.canvas.height=Lemon.height;
+    
+    Lemon.canvas.id="Lemongamecanvas";
 
     Lemon.canvas.style.width=Lemon.width*Lemon.scale+"px";
     Lemon.canvas.style.height=Lemon.height*Lemon.scale+"px";
@@ -148,6 +202,12 @@ Lemon.init=function(config){
 
     Lemon.style=document.createElement("style");
     Lemon.style.innerText=Lemon.pixelart?"canvas, img {image-rendering: optimizeSpeed;image-rendering: -moz-crisp-edges;image-rendering: -webkit-optimize-contrast;image-rendering: optimize-contrast;image-rendering: pixelated;-ms-interpolation-mode: nearest-neighbor;} body {margin: 0; height: 100%; overflow: hidden}":"";
+    if(Lemon.pixelart){
+        Lemon.ctx.imageSmoothingEnabled=false;
+    }
+    if(Lemon.hideCursor){
+        Lemon.style.innerText+="canvas {cursor:none;}";
+    }
     document.body.appendChild(Lemon.style);
     Lemon.initHandlers();
 
@@ -176,17 +236,31 @@ Lemon.initHandlers=function(){
         if(!Lemon.running)return;
         Lemon.mouse.isDown=false;
     }
-    Lemon.canvas.onmousemove=function(evt){
+    Lemon.canvas.addEventListener("mousemove",function(evt){
+        evt.preventDefault();
         if(!Lemon.running)return;
         Lemon.mouse.screenX=evt.clientX;
         Lemon.mouse.screenY=evt.clientY;
         Lemon.currentScene.onmousemove(evt);
-    }
+    },true)
     document.onkeyup=function(evt){
         if(!Lemon.running)return;
         Lemon.currentScene.onkeyup(evt);
         delete Lemon.input.keysDown[evt.keyCode];
     }
+    window.addEventListener("gamepadconnected",function(e) {
+        var gp=navigator.getGamepads()[e.gamepad.index];
+        console.log("Gamepad connected at index %d: %s. %d buttons, %d axes.",
+        gp.index,gp.id,
+        gp.buttons.length, gp.axes.length);
+        Lemon.gamepads[gp.index]=Lemon.gamepad(gp.index);
+        Lemon.currentScene.ongamepadconnect(gp);
+    });
+    window.addEventListener("gamepaddisconnected",function(e){
+        delete Lemon.gamepads[e.gamepad.index];
+        console.log("Gamepad with index "+gamepad.index+" disconnected.")
+        Lemon.currentScene.ongamepaddisconnect(e.gamepad);
+    });
 }
 Lemon.createCanvas=function(parent=document.body,obj){
     let canvas=document.createElement("canvas");
@@ -227,7 +301,7 @@ Lemon.math.collision=(rect1, rect2)=>{
     return rect1.x < rect2.x + rect2.width &&
     rect1.x + rect1.width > rect2.x &&
     rect1.y < rect2.y + rect2.height &&
-    rect1.height + rect1.y > rect2.y
+    rect1.height + rect1.y > rect2.y;
 }
 Lemon.math.randint=(min,max)=>Math.floor(Math.random() * (Math.floor(max+1) - Math.ceil(min))) + Math.ceil(min);
 Lemon.math.random=(min,max)=>Math.random() * (max - min) + min;
@@ -236,10 +310,11 @@ Lemon.math.distance=function(ent1,ent2){
     let dy=(ent1.y+ent2.height/2)-(ent2.y+ent2.height/2);
     return Math.sqrt(dx * dx + dy * dy);
 }
-Lemon.math.vecFromAngle=(a,l=10)=>Lemon.vec(Math.cos(a-90),Math.sin(a-90)).setLength(length)
+Lemon.math.vecFromAngle=(a,l=10)=>{a=Lemon.math.radians(a-90);return Lemon.vec(Math.cos(a),Math.sin(a)).setLength(l)};
 Lemon.math.angleBetween=(p1,p2)=>(Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI)+90;
 Lemon.math.radians=(d)=>d*Math.PI/180;
 Lemon.math.degrees=(r)=>r*180/Math.PI;
+Lemon.math.vecFromTo=(f,t)=>Lemon.vec(t.cx-f.cx,t.cy-f.cy);
 //loop assets
 Lemon.start=function(){
 
@@ -250,8 +325,8 @@ Lemon.start=function(){
     return this;
 
 }
-Lemon.onDraw=function(){};
-Lemon.onUpdate=function(){};
+Lemon.ondraw=function(){};
+Lemon.onupdate=function(){};
 
 Lemon.stop=function(){
 
@@ -262,27 +337,22 @@ Lemon.stop=function(){
 
 Lemon.enterScene=function(scene){
 
-    scene.onEnter();
-    if(Lemon.currentScene.soundtrack){
-        Lemon.currentScene.soundtrack.stop();
-    }
+    scene.onenter();
     Lemon.currentScene=scene;
-    if(scene.soundtrack){
-        scene.soundtrack.loop=true;
-        scene.soundtrack.play();
-    }
     return this;
 }
 
 Lemon.step=function(){
     Lemon.updateTweens();
+    let dt=Lemon.dt;
     Lemon.currentScene.update();
-    Lemon.currentScene.draw();
-    if(Date.now()-Lemon.lastfixedUpdate>Lemon.fixedUpdateInterval){
-        Lemon.lastfixedUpdate=Date.now();
-        Lemon.currentScene.fixedUpdate();
+    while(dt>1000/60){
+        Lemon.currentScene.update();
+        dt-=1000/60;
     }
+    Lemon.currentScene.draw();
     Lemon.input.previousKeysDown=Lemon.clone(Lemon.input.keysDown);
+    Lemon.lastStep=Date.now();
     if(!(Lemon.running||Lemon.rendering))return;
     requestAnimationFrame(Lemon.step);
 }
@@ -306,6 +376,7 @@ Lemon.loader=Object.create({
     },
     loadFile(source){
         let extension=source.split(".")[1];
+        
         let folders=source.split("/");
         let name=folders[folders.length-1].split(".")[0];
 
@@ -367,7 +438,7 @@ Lemon.loadJSON=function(source, callback){
 }
 Lemon.loadTileset=function(properties){
     let tiles=["NO-TILE"];
-    let props=Lemon.clone(properties);
+    let props=JSON.parse(JSON.stringify(properties));
     let folders=properties.image.split("/");
     let name=folders[folders.length-1].split(".")[0];
 
@@ -377,13 +448,35 @@ Lemon.loadTileset=function(properties){
     props.image=Lemon.loader.assets[name];
 
     for(let t=0;t<(props.image.width/props.tilewidth)*(props.image.height/props.tileheight);t++){
-        let x=(t)%(props.image.width/props.tilewidth); //(t*16)-((t*16)/image.width);
+        let x=(t)%(props.image.width/props.tilewidth);
         let y=Math.floor((t)/(props.image.width/props.tilewidth));
 
         let tile=Lemon.sprite(props.image,x*props.tilewidth,y*props.tileheight,props.tilewidth,props.tileheight);
         tiles.push(tile);
     }
     return tiles;
+}
+Lemon.lastFpsUpdate=0;
+Lemon.minFps=Infinity;
+Lemon.maxFps=0;
+Lemon.frames=0;
+Lemon.allfpssum=0;
+Lemon.drawFps=function(){
+    if(Date.now()-Lemon.lastFpsUpdate>10){
+        Lemon.fps=Math.round(1000/Math.max(1,Lemon.dt));
+        Lemon.lastFpsUpdate=Date.now();
+        if(Lemon.fps>Lemon.maxFps){
+            Lemon.maxFps=Lemon.fps;
+        }
+        if(Lemon.fps<Lemon.minFps){
+            Lemon.minFps=Lemon.fps;
+        }
+        Lemon.frames++;
+        Lemon.allfpssum+=Lemon.fps;
+        Lemon.avgFps=Math.round(Lemon.allfpssum/Lemon.frames);
+    }
+    Lemon.ctx.fillStyle="white";
+    Lemon.ctx.fillText("FPS: "+Lemon.fps+" AVG:"+Lemon.avgFps+" MIN: "+Lemon.minFps+" MAX: "+Lemon.maxFps, 20+Lemon.camX,20+Lemon.camY);
 }
 ////////////////////////////////////
 //classes                         //
@@ -401,19 +494,22 @@ Lemon.scene=(config)=>new Lemon.classes.Scene(config);
 Lemon.sound=src=>new Lemon.classes.Sound(src);
 Lemon.tween=(o,p,ev,t,m)=>new Lemon.classes.Tween(o,p,ev,t,m);
 Lemon.interval=Lemon.timer=(func,interval)=>new Lemon.classes.Interval(func,interval);
+Lemon.spritefont=(img,lw,lh,ss)=>new Lemon.classes.Spritefont(img,lw,lh,ss);
+Lemon.gamepad=p=>new Lemon.classes.GamePad(p);
 
 //returns extended image object
-Lemon.img=function(path){
+Lemon.img=function(path,scale=1){
 
     let image=new Image();
     image.src=path;
     image.ready=false;
+    image.scale=scale;
     image.onload=function(){
 
         this.ready=true;
     }
     image.draw=function(x, y){
-        Lemon.ctx.drawImage(this, x, y);
+        Lemon.ctx.drawImage(this,x,y,this.width*this.scale,this.height*this.scale);
     }
     image.extend=Lemon.extend;
     image.attr=Lemon.extend;
@@ -459,26 +555,30 @@ Lemon.classes.Entity=class{
         this.isVisible=true;
         this.rotation=0;
 
-        this.hb={width:16,height:16,xOffset:0,yOffset:0};
+        this.hb={width:this.width,height:this.height,xOffset:0,yOffset:0};
+        this.useCustomHitbox=true;
         this.extend=Lemon.extend;
         this.attr=Lemon.extend;
 
     }
-    onAddedToScene(){}
+    onaddedtoscene(){}
     input(){}
-    onUpdate(){}
-    fixedUpdate(){}
+    onupdate(){}
+    fixedUpdate(){
+        this.xv*=Lemon.currentScene.friction;
+        this.yv*=Lemon.currentScene.friction;
+    }
 
     update(elapsed){
 
         this.timeElapsed=elapsed;
         this.updateComponents();
         this.input();
-        this.onUpdate();
+        this.onupdate();
         this.updatePos();
 
     }
-    onDraw(){}
+    ondraw(){}
     updatePos(){
         this.x+=(this.xv*(Math.max(this.timeElapsed,0.1)/10));
         this.y+=(this.yv*(Math.max(this.timeElapsed,0.1)/10));
@@ -491,10 +591,14 @@ Lemon.classes.Entity=class{
         }
     }
     __draw__(){
+        this.drawPosition={
+            x:Lemon.pixelPerfectRendering?Math.round(this.centerX):this.centerX,
+            y:Lemon.pixelPerfectRendering?Math.round(this.centerY):this.centerY
+        }
         Lemon.ctx.globalAlpha=this.alpha;
         if(this.rotation!=0){
             Lemon.ctx.save();
-            Lemon.ctx.translate(Math.floor(this.centerX),Math.floor(this.centerY));
+            Lemon.ctx.translate(this.drawPosition.x,this.drawPosition.y);
             Lemon.ctx.rotate(Lemon.math.radians(this.rotation));
             this.sprite.draw(-(this.sprite.width/2),-(this.sprite.height/2));
             Lemon.ctx.restore();
@@ -502,13 +606,13 @@ Lemon.classes.Entity=class{
         }else{
             this.draw();
         }
-        this.onDraw();
+        this.ondraw();
         Lemon.ctx.globalAlpha=1;
     }
     draw(){
         if(!this.sprite)return;
         //this.sprite.draw(Math.floor(this.x),Math.floor(this.y))
-        this.sprite.draw(Math.round(this.centerX-this.sprite.width/2),Math.round(this.centerY-this.sprite.height/2))
+        this.sprite.draw(this.drawPosition.x-this.sprite.width/2,this.drawPosition.y-this.sprite.height/2);
     }
     initComponents(){
         this.components=[];
@@ -523,14 +627,17 @@ Lemon.classes.Entity=class{
     }
     addToScene(scene){
         scene.entities.push(this);
-        this.onAddedToScene(scene);
+        this.onaddedtoscene(scene);
+        scene.updateBodyList();
         return this;
     }
     delFromScene(scene){
         scene.entities.splice(scene.entities.indexOf(this),1);
+        scene.updateBodyList();
+        return this;
     }
     collidesWith(tag_){
-        let ents=Lemon.getAll("physics")
+        let ents=Lemon.currentScene.entities;//Lemon.getAll("physics")
         for(let e_=0;e_<ents.length;e_++){
             if(ents[e_].is(tag_)&&Lemon.math.collision(this, ents[e_]) && ents[e_] !=this){
                 return ents[e_];
@@ -558,7 +665,7 @@ Lemon.classes.Entity=class{
     blockMovement(tag,priority="Y"){
         //pass a tag as an argument and the entitys movement will be blocked by entities with this tag
         var collisionSide="none";
-        Lemon.getAll("physics").forEach((that)=>{
+        Lemon.currentScene.bodies.forEach((that)=>{
             if(that.is(tag)&&that!=this){
 
                 let overlapX,overlapY
@@ -572,8 +679,8 @@ Lemon.classes.Entity=class{
 
                 if(Math.abs(vec.x)<combinedHalfWidths){
                     if(Math.abs(vec.y)<combinedHalfHeights){
-                        overlapX=Math.floor(combinedHalfWidths-Math.abs(vec.x));
-                        overlapY=Math.floor(combinedHalfHeights-Math.abs(vec.y));
+                        overlapX=combinedHalfWidths-Math.abs(vec.x);
+                        overlapY=combinedHalfHeights-Math.abs(vec.y);
                         if(overlapY>overlapX){ 
                             if(vec.x>0){
                                 collisionSide="left";
@@ -595,9 +702,8 @@ Lemon.classes.Entity=class{
                         if(overlapY==overlapX){
                             //this[priority.toLowerCase()]+={overlapX,overlapY}["overlap"+priority];
 
-                            //for some reason it works best when i do nothing here. else
-                            //it sometimes happens that when the overlaps are the same, the entity doesnt move at all.
-                            //it works like this, no idea why! xD
+                            //works best when i do nothing here.
+                            //else it sometimes happens that when the overlaps are the same, the entity doesnt move at all.
                         }
                     }else{
                         return "none";
@@ -619,7 +725,7 @@ Lemon.classes.Entity=class{
         this.tween("y",toy,time,method);
         return this;
     }
-    lineOfSight(that,blockingTag,accuracy){
+    lineOfSight(that,blockingTag,accuracy,useCustomHitbox=false){
         let lineOfSight=true;
         let totalVec=Lemon.vec(that.centerX-this.centerX,that.centerY-this.centerY);
         let vec=Lemon.vec().attr(Lemon.clone(totalVec)).setLength(accuracy);
@@ -632,12 +738,12 @@ Lemon.classes.Entity=class{
             e.centerX=this.centerX+b*vec.x;
             e.centerY=this.centerY+b*vec.y;
             Lemon.ctx.fillRect(e.x-Lemon.camX,e.y-Lemon.camY,1,1);
-            if(Lemon.math.collision(that.hitbox,e)){
-                return true;
-            }
-            if(validEnts.some((ent)=>Lemon.math.collision(ent.hitbox,e))){
+            if(validEnts.some((ent)=>(Lemon.math.collision(useCustomHitbox?ent.hitbox:ent,e)&&!(ent==this||ent==that)))){
                 lineOfSight=false;
                 return lineOfSight;
+            }
+            if(Lemon.math.collision(that.hitbox,e)){
+                return true;
             }
         }
         return lineOfSight;
@@ -650,15 +756,23 @@ Lemon.classes.Entity=class{
         return Lemon.math.collision({x:this.x,y:this.y,width:this.width,height:this.height},{x:0,y:0,width:Lemon.currentScene.width,height:Lemon.currentScene.height})
     }
     get hitbox(){
-        return {
+        return this.useCustomHitbox?{
             x:this.x+this.hb.xOffset,
             y:this.y+this.hb.yOffset,
             width:this.hb.width,
             height:this.hb.height
-        }
+        }:{
+            x:this.x,
+            y:this.y,
+            width:this.width,
+            height:this.height
+        };
     }
     set hitbox(value){
         Object.assign(this.hb,value);
+    }
+    get center(){
+        return {x:this.cx,y:this.cy,width:1,height:1}
     }
     get centerX(){
         return this.x+this.width/2;
@@ -721,23 +835,108 @@ Lemon.classes.Entity=class{
         this.cx=value.x;
         this.cy=value.y;
     }
+}
+Lemon.classes.GamePad=class{
+    constructor(gamepadIndex){
+        this.index=gamepadIndex;
+        this.attr=Lemon.extend;
+        this.extend=Lemon.extend;
 
+        let gp=navigator.getGamepads()[this.index];
+
+        this.buttons=gp.buttons;
+        this.previousButtons=gp.buttons;
+    }
+    buttonDown(button){
+        return this.buttons[button];
+    }
+    buttonPressed(button){
+        //console.log(this.buttons[button].pressed&&!this.previousButtons[button].pressed);
+        return this.buttons[button]&&!this.previousButtons[button];
+    }
+    update(){
+        let gp=navigator.getGamepads()[this.index]
+
+        this.previousButtons=[];
+        for(let b=0;b<this.buttons.length;b++){
+            this.previousButtons[b]=this.buttons[b];
+        }
+
+        this.buttons=[];
+        for(let b=0;b<gp.buttons.length;b++){
+            this.buttons[b]=gp.buttons[b].pressed;
+        }
+        this.previousAxes=this.axes||{};
+        this.axes=JSON.parse(JSON.stringify(gp.axes));
+
+        if(this.previousButtons[2]!=this.buttons[2]){
+            console.log("X")
+        }
+    }
+    joystick(index){
+        index==0?{x:this.axes[0],y:this.axes[1]}:{x:this.axes[2],y:this.axes[3]}
+    }
+}
+Lemon.classes.Spritefont=class{
+    constructor(img,letterwidth,letterheight,spacesize=1){
+        this.attr=this.extend=Lemon.extend;
+        this.attr({img,letterwidth,letterheight,spacesize});
+        this.symbols=[];
+        this.order="abcdefghijklmnopqrstuvwxyz.!?0123456789:,";
+    }
+    init(){
+        for(let y=0;y<this.img.height;y+=this.letterheight){
+            for(let x=0;x<this.img.width;x+=this.letterwidth){
+                let s=Lemon.sprite(this.img,x,y,this.letterwidth,this.letterheight);
+                this.symbols.push(s);
+            }
+        }
+        return this;
+    }
+    write(text,x,y,align="right",offset=0){
+        this.text=text.toLowerCase();
+        if(align=="right"){
+            this.originalX=x;
+            this.currentX=x;
+        }
+        if(align=="center"){
+            this.currentX=x-(this.text.length*(this.letterwidth+offset)/2);
+            this.originalX=this.currentX;
+        }
+        this.currentY=y;
+        for(let l=0;l<this.text.length;l++){
+            if(!(this.text[l]=="\n")&&!(this.text[l]==" ")){
+                this.symbols[this.order.indexOf(this.text[l])].draw(this.currentX,this.currentY);
+                this.currentX+=this.letterwidth+offset;
+            }else{
+                if(this.text[l]==" "){
+                    this.currentX+=this.spacesize;
+                }else{
+                    this.currentY+=this.letterheight+1;
+                    this.currentX=this.originalX;
+                }
+            }
+        }
+    }
 }
 Lemon.classes.Tween=class{
 
-    constructor(object,property,endValue,time,easingMethod="smoothstep"){
+    constructor(object,property,endValue,time,easingMethod="smoothstep",endValueObject=false,endValueProperty=false){
         this.object=object;
         this.property=property;
+        this.to=endValue;
 
         this.totalTime=time;
         this.currentTime=0;
 
-        this.endValue=endValue;
+        //this.endValue=endValue;
         this.startValue=JSON.parse(JSON.stringify(this.object[this.property]));
         this.easingMethod=easingMethod;
 
         this.extend=this.attr=Lemon.extend;
 
+        this.endValueObject=endValueObject;
+        this.endValueProperty=endValueProperty;
         Lemon.tweens.push(this);
 
     }
@@ -752,7 +951,7 @@ Lemon.classes.Tween=class{
                 //this.currentTime++;
             }else{
                 this.stop();
-                this.onEnded();
+                this.onended();
             }
         }
     }
@@ -770,8 +969,13 @@ Lemon.classes.Tween=class{
     stop(){
         this.running=false;
     }
-    onEnded(){
+    onended(){
+        this.object[this.property]=this.endValue;
         this.remove();
+    }
+    get endValue(){
+        return this.to;
+        return (this.endValueObject&&this.endValueProperty)?this.endValueObject[this.endValueProperty]:this.to;
     }
 }
 Lemon.classes.Sound=class{
@@ -788,7 +992,7 @@ Lemon.classes.Sound=class{
     }
 
     play(){
-        let isPlaying = this.sound.currentTime > 0 && !this.sound.paused && !this.sound.ended && this.sound.readyState > 2;
+        let isPlaying=this.sound.currentTime>0&&!this.sound.paused&&!this.sound.ended&&this.sound.readyState>2;
 
         if (!isPlaying) {
             this.sound.play();
@@ -829,8 +1033,8 @@ Lemon.classes.Sprite=class{
                 this.width,
                 this.height,
                 x,y,
-                this.width,
-                this.height
+                this.width*this.img.scale,
+                this.height*this.img.scale
             );
         }
         return this;
@@ -864,6 +1068,7 @@ Lemon.classes.Scene=class{
         this.running=true;
 
         this.width=this.height=2000;
+        this.friction=1;
 
         this.extend=Lemon.extend;
         this.attr=Lemon.extend;
@@ -874,12 +1079,15 @@ Lemon.classes.Scene=class{
     onkeydown(){}
     onkeyup(){}
     onmousemove(){}
-    onUpdate(){}
-    onDraw(){}
+    onupdate(){}
+    ondraw(){}
+    input(){}
+    ongamepadconnect(){}
+    ongamepaddisconnect(){}
     bind(key,func){
         this.bindings[key]=func;
     }
-    onEnter(){}
+    onenter(){}
     setCam(cam){
         this.camera=cam;
         return this;
@@ -888,17 +1096,18 @@ Lemon.classes.Scene=class{
     draw(){
         if(this.rendering){
             Lemon.ctx.save();
-            Lemon.ctx.translate(-Math.round(Lemon.camX),-Math.round(Lemon.camY));
+            Lemon.ctx.translate(Lemon.pixelPerfectRendering?-Math.round(Lemon.camX):-Lemon.camX,Lemon.pixelPerfectRendering?-Math.round(Lemon.camY):-Lemon.camY);
             Lemon.ctx.clearRect(0,0,Lemon.width+Lemon.camX,Lemon.height+Lemon.camY);
             this.drawBackground();
             this.drawEntities();
             this.drawForeground();
-            this.onDraw();
+            Lemon.showfps?Lemon.drawFps():0;
+            this.ondraw();
             Lemon.ctx.restore();
         }
     }
     drawBackground(){
-        if(this.background&&this.background.ready){
+        if(this.background&&(this.background.img?this.background.img.ready:this.background.ready)){
             this.background.draw(0,0);
         }
         if(typeof this.background=="string"){
@@ -940,9 +1149,14 @@ Lemon.classes.Scene=class{
         if(this.running){
             Lemon.elapsed=Date.now()-Lemon.lastStep;
             Lemon.lastStep=Date.now();
-            this.onUpdate();
+            this.updateGamepads();
+            this.input();
+            this.onupdate();
             this.intervals.forEach(i=>i.update())
             this.updateEntities();
+            if(Date.now()-Lemon.lastfixedUpdate>Lemon.fixedUpdateInterval){
+                Lemon.lastfixedUpdate=Date.now();
+                this.fixedUpdate();            }
         }
     }
     fixedUpdate(){
@@ -952,11 +1166,19 @@ Lemon.classes.Scene=class{
         this.entities.forEach(Lemon.updateObj);
         Lemon.animations.forEach(Lemon.updateObj);
     }
+    updateGamepads(){
+        for(let gp in Lemon.gamepads){
+            Lemon.gamepads[gp].update();
+        }
+    }
+    updateBodyList(){
+        this.bodies=this.entities.filter(e=>e.is(Lemon.bodyTag));
+    }
     loadTiledMap(map,props={}){
         this.attr({
             width:map.width*map.tilewidth,height:map.height*map.tileheight,
             tilewidth:map.tilewidth,tileheight:map.tileheight,
-            layers:{},objects:[],name:map.name
+            layers:{},objects:[],name:map.name,map:map
         });
         this.tileset=Lemon.loadTileset(map.tilesets[0]);
         map.layers.forEach((layer,layerIndex)=>{
@@ -1048,7 +1270,8 @@ Lemon.classes.Camera=class{
         this.width=Lemon.width;
         this.height=Lemon.height;
 
-        this.trapSize=0.5;
+        this.trapSize=0.4;
+        this.tweens={};
 
         this.extend=this.attr=Lemon.extend;
     }
@@ -1065,18 +1288,43 @@ Lemon.classes.Camera=class{
         this.x+=x;
         this.y+=y;
     }
-    follow(ent){
+    tween(property,to,time,method,evo,evp){
+        this.tweens[property]?this.tweens[property].remove():0;
+        this.tweens[property]=Lemon.tween(this,property,to,time,method,evo,evp).start();
+        return this.tweens[property];
+    }
+    follow(ent,time="none"){
+        
+        if(time!=="none"){
+            if(ent.x<this.leftInnerBoundary){
+                //this.tween("x",ent.x-(this.width*(0.5-this.trapSize/2)),time,"decelerationCubed");
+            }
+            if(ent.y<this.topInnerBoundary){
+                this.tween("y",ent.y-(this.height*(0.5-this.trapSize/2)),time,"decelerationCubed");
+            }
+            if(ent.x+ent.width>this.rightInnerBoundary){
+                this.tween("x",ent.x+ent.width-(this.width*(0.5+this.trapSize/2)),time,"decelerationCubed");
+            }
+            if(ent.y+ent.height>this.bottomInnerBoundary){
+                this.tween("y",ent.y+ent.height-(this.height*(0.5+this.trapSize/2)),time,"decelerationCubed");
+            }
+            if(this.x<0){this.x=0;}
+            if(this.x>Lemon.currentScene.width-this.width){this.x=Lemon.currentScene.width-this.width;}
+            if(this.y<0){this.y=0;}
+            if(this.y>Lemon.currentScene.height-this.height){this.y=Lemon.currentScene.height-this.height;}
+            return;
+        }
         if(ent.x<this.leftInnerBoundary){
-            this.x=Math.floor(ent.x-(this.width*(0.5-this.trapSize/2)));
+            this.x=ent.x-(this.width*(0.5-this.trapSize/2));
         }
         if(ent.y<this.topInnerBoundary){
-            this.y=Math.floor(ent.y-(this.height*(0.5-this.trapSize/2)));
+            this.y=ent.y-(this.height*(0.5-this.trapSize/2));
         }
         if(ent.x+ent.width>this.rightInnerBoundary){
-            this.x=Math.floor(ent.x+ent.width-(this.width*(0.5+this.trapSize/2)));
+            this.x=ent.x+ent.width-(this.width*(0.5+this.trapSize/2));
         }
         if(ent.y+ent.height>this.bottomInnerBoundary){
-            this.y=Math.floor(ent.y+ent.height-(this.height*(0.5+this.trapSize/2)));
+            this.y=ent.y+ent.height-(this.height*(0.5+this.trapSize/2));
         }
         if(this.x<0){this.x=0;}
         if(this.x>Lemon.currentScene.width-this.width){this.x=Lemon.currentScene.width-this.width;}
@@ -1122,6 +1370,7 @@ Lemon.classes.Animation=class{
         this.onended=function(){
             if(this.loop){
                 this.currentFrame=0;
+                this.sprite.x=0;
                 this.running=true;
             }
         }
@@ -1178,6 +1427,42 @@ Lemon.classes.Vector=class{
 
         return this;
     }
+    rotate(center,angle){
+        let r=[];
+        let x=this.x-center.x;
+        let y=this.y-center.y;
+
+        r[0]=x*Math.cos(-angle)-y*Math.sin(-angle);
+        r[1]=x*Math.sin(-angle)+y*Math.cos(-angle);
+        r[0]+=center.x;
+        r[1]+=center.y;
+
+        return Lemon.vec(r[0],r[1]);   
+    }
+    add(vec){
+        return Lemon.vec(this.x+vec.x,this.y+vec.y);
+    }
+    subtract(vec){
+        return Lemon.vec(this.x-vec.y,this.y-vec.y);
+    }
+    scale(n){
+        return Lemon.vec(this.x*n,this.y*n);
+    }
+    multiply(vec){
+        return Lemon.vec(this.x*vec.x,this.y*vec.y);
+    }
+    cross(vec){
+        return Lemon.vec(this.x*vec.y,this.y*vec.x);
+    }
+    normalize(){
+        return Lemon.vec(this.x,this.y).setLength(1);
+    }
+    distance(vec){
+        let x=this.x-vec.x;
+        let y=this.y-vec.y;
+
+        return Math.sqrt(x*x+y*y);
+    }
     get length(){
         return Math.sqrt(this.x*this.x+this.y*this.y);
     }
@@ -1188,7 +1473,7 @@ Lemon.classes.Vector=class{
 Lemon.particle=function(opts){
     let vec=Lemon.vec(Lemon.math.random(opts.minXV,opts.maxXV),Lemon.math.random(opts.minYV,opts.maxYV))
     return Lemon.e("particle").extend({
-        x:0,y:0,minXV:-5,minYV:-5,maxXV:5,maxYV:5,maxSpeed:5,sprite:Lemon.rectangle(2,2,"grey"),lifetime:300,onUpdate(){
+        x:0,y:0,minXV:-5,minYV:-5,maxXV:5,maxYV:5,maxSpeed:5,sprite:Lemon.rectangle(2,2,"grey"),lifetime:300,onupdate(){
         this.alpha=1-(Date.now()-this.created)/this.lifetime;
         //this.rotation+=0.5;
         },layer:0
@@ -1330,18 +1615,5 @@ Lemon.c("flickering").attr({
     obj:{
         interval:1000,
         state:0
-    }
-});
-Lemon.c("color").attr({
-    obj:{
-        color:"black",
-        draw(){
-            Lemon.ctx.fillStyle=this.color;
-            if(this.fixedToCamera){
-                Lemon.ctx.fillRect(this.x,this.y,this.width,this.height);
-            }else{
-                Lemon.ctx.fillRect(this.x-Lemon.camX,this.y-Lemon.camY,this.width,this.height);
-            }
-        }
     }
 });
