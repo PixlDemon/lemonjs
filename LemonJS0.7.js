@@ -268,9 +268,6 @@ Lemon.createCanvas=function(parent=document.body,obj){
     parent.appendChild(canvas);
     return canvas;
 }
-
-//i should probably compress this, its kinda confusing. but i use them all
-//in different projects that i dont want to recode the event system of
 Lemon.keyDown=function(key){
     if(key=="MOUSE"){
         return Lemon.mouse.isDown;
